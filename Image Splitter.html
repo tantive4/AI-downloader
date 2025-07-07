@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Splitter</title>
+</head>
+<body>
+    <h1>Image Batch Splitter</h1>
+    <p>Upload your merged image batches (e.g., `AIFS_070712.png`). Each batch will be split into 10 individual images, with filenames adjusted by +6 hours.</p>
+
+    <input type="file" id="imageUpload" accept="image/png" multiple>
+
+    <script>
+        const imageUpload = document.getElementById('imageUpload');
+
+        function parseFilename(filename) {
+            const nameWithoutExt = filename.replace(/\.png$/i, ''); // Remove .png extension
+            const parts = nameWithoutExt.split('_');
+
+            let prefix = '';
+            let datePartString = nameWithoutExt;
+
+            if (parts.length > 1) {
+                const possiblePrefix = parts[0];
+                if (isNaN(parseInt(possiblePrefix, 10))) { // If the first part is not a number, treat it as a prefix
+                    prefix = possiblePrefix;
+                    datePartString = parts.slice(1).join('_');
+                }
+            }
+
+            // Extract MMDDHH from the datePartString (must be at the end)
+            const dateMatch = datePartString.match(/(\d{2})(\d{2})(\d{2})$/);
+            if (!dateMatch) {
+                throw new Error(`Could not parse MMDDHH (MonthDayHour) from filename: ${filename}. Expected format: [PREFIX_]MMDDHH.png`);
+            }
+            const [, monthStr, dayStr, hourStr] = dateMatch;
+
+            // Create a Date object for KST. We assume the current year.
+            const currentYear = new Date().getFullYear();
+            const kstDate = new Date(currentYear, parseInt(monthStr, 10) - 1, parseInt(dayStr, 10), parseInt(hourStr, 10));
+
+            // Basic validation to ensure the date components parsed match the Date object created.
+            if (kstDate.getMonth() + 1 !== parseInt(monthStr, 10) ||
+                kstDate.getDate() !== parseInt(dayStr, 10) ||
+                kstDate.getHours() !== parseInt(hourStr, 10)) {
+                console.warn(`Warning: Parsed date components (${monthStr}/${dayStr} ${hourStr}h) for "${filename}" do not exactly match the created Date object. This might indicate an invalid original date or a year boundary issue.`);
+            }
+
+            return { prefix, kstDate };
+        }
+
+        function formatKSTDate(date) {
+            const MM = String(date.getMonth() + 1).padStart(2, '0');
+            const DD = String(date.getDate()).padStart(2, '0');
+            const HH = String(date.getHours()).padStart(2, '0');
+            return `${MM}${DD}${HH}`;
+        }
+
+        function delay(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        async function splitBatchImage(file) {
+            // console.log(`Processing batch image: ${file.name}`); // Removed as per request
+            try {
+                const reader = new FileReader();
+                reader.readAsDataURL(file); // Read the file as a Data URL
+
+                await new Promise((resolve, reject) => {
+                    reader.onload = () => resolve();
+                    reader.onerror = error => reject(error);
+                });
+
+                const image = new Image();
+                image.src = reader.result; // Set image source to the Data URL
+
+                await new Promise((resolve, reject) => {
+                    image.onload = () => resolve();
+                    image.onerror = error => reject(error);
+                });
+
+                const batchWidth = image.width;
+                const batchHeight = image.height;
+                const BATCHSIZE = 10
+                const individualImageWidth = batchWidth / BATCHSIZE; // Assuming exactly 10 images merged horizontally
+
+                if (individualImageWidth % 1 !== 0) {
+                    console.warn(`Warning: Batch width (${batchWidth}) of ${file.name} is not perfectly divisible by 10. Individual image width will be ${individualImageWidth}. This might result in slight pixel inaccuracies.`);
+                }
+
+                // Extract prefix and initial date from the batch filename
+                const { prefix, kstDate: initialKstDate } = parseFilename(file.name);
+
+                // Loop 10 times to cut and save each individual image
+                for (let i = 0; i < 10; i++) {
+                    const canvas = document.createElement('canvas'); // Canvas for the individual image
+                    canvas.width = individualImageWidth;
+                    canvas.height = batchHeight;
+                    const ctx = canvas.getContext('2d');
+
+                    const sourceX = i * individualImageWidth; // X-coordinate to start cutting from the batch image
+                    // Draw the specific section of the batch image onto the new individual canvas
+                    ctx.drawImage(
+                        image,
+                        sourceX, 0, // Source X, Y on the batch image
+                        individualImageWidth, batchHeight, // Source width, height
+                        0, 0, // Destination X, Y on the new canvas
+                        individualImageWidth, batchHeight // Destination width, height
+                    );
+
+                    // Calculate the new KST date for this individual image
+                    const currentKstDate = new Date(initialKstDate); // Create a copy to avoid modifying the original
+                    currentKstDate.setHours(currentKstDate.getHours() + (i * 6)); // Add 6 hours for each subsequent image
+
+                    const newDatePart = formatKSTDate(currentKstDate); // Format the new date
+                    // Construct the new filename: [PREFIX_]MMDDHH.png
+                    const newFilename = prefix ? `${prefix}_${newDatePart}.png` : `${newDatePart}.png`;
+
+                    // Convert the individual canvas to PNG blob and trigger download
+                    const pngBlob = await new Promise((resolve, reject) => {
+                        canvas.toBlob(resolve, 'image/png');
+                        setTimeout(() => reject(new Error(`Timeout converting canvas to PNG for ${newFilename}`)), 10000); // Increased timeout
+                    });
+
+                    // Trigger download - this will prompt the user for each file
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(pngBlob);
+                    a.download = newFilename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(a.href); // Clean up the object URL
+
+                    // console.log(`Triggered download for: ${newFilename}`); // Removed as per request
+                    await delay(100); // Small delay between downloads
+                }
+                console.log(`Finished splitting and downloading all parts of ${file.name}.`);
+            } catch (error) {
+                console.error(`Error splitting image ${file.name}: ${error.message}`);
+            }
+        }
+
+        // Event listener for file input change
+        imageUpload.addEventListener('change', async (event) => {
+            const files = event.target.files;
+            if (files.length === 0) {
+                console.log("No files selected.");
+                return;
+            }
+
+            console.log(`Starting to process ${files.length} batch image(s).`);
+            // console.log("ATTENTION: Your browser will prompt you to save EACH individual image (10 per batch). Please confirm each download."); // Removed as per request
+
+            for (const file of files) {
+                if (file.type.startsWith('image/')) {
+                    await splitBatchImage(file);
+                } else {
+                    console.warn(`Skipping non-image file: ${file.name}`);
+                }
+            }
+            console.log("All selected batch images have been processed!");
+            alert('쿨쿨ZZZ')
+        });
+    </script>
+</body>
+</html>
